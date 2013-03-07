@@ -1,0 +1,1565 @@
+#! /usr/bin/python
+
+############################################################
+# Program: resequencing
+# Usage: do requencing analysis with NGS
+# qualityCheck filter align consenseSequence SNP and Indel
+# Author: Chen Jiehu
+# Version: 1.0
+#       Editor: chenjiehu@scgene.com
+#       Modify: division with PE and SE mode
+#       Date: Mon May 21 16:51:28 CST 2012
+############################################################
+
+import sys
+import os
+from optparse import OptionParser
+import commands
+import time
+import re
+
+#import other module
+sys.path.append("/scgene/elephant/pipeline/python/module")
+import manJob
+import getFiles
+import dirCheck
+import makeShell
+
+BIN = sys.argv[0]
+PATH = os.path.dirname(BIN)  #bin directory
+SUBBIN = PATH + "/subBin/"  #subBin directory
+DIVISIONPE = SUBBIN + "/splitSamPE.py"
+DIVISIONSE = SUBBIN + "/splitSamSE.py"
+BWA = SUBBIN + "/bwa"
+SAMTOOLS = SUBBIN + "/samtools"
+SNP = SUBBIN + "/snp.py"
+INDEL = SUBBIN + "/dindel.py"
+SGEHEAD = "#$ -S /bin/sh\n#! /bin/bash"
+
+
+def work(cmd):
+    sys.stderr.write("[%s] Start CMD: %s \n" % (time.ctime(), cmd))
+    os.system(cmd)
+    sys.stderr.write("[%s] Finish CMD: %s \n" % (time.ctime(), cmd))
+
+
+def getUsage(command):
+    (status, output) = commands.getstatusoutput(command)  #print bwa aln options
+    output = output.split("\n")
+    for line in output:
+	if not re.search("Usage", line):
+	    print line
+
+
+def align(Args):  #align with bwa
+    if not Args:
+	print "\nUsage:\t\talign [options] <index> <fqDir> <alignDir>"
+	print "ATTENTION:\tdo not set -f opption(program will auto set it)"
+
+	cmd = "%s aln" % (BWA)
+	getUsage(cmd)
+	sys.exit(0)
+	
+    index = Args[-3]
+    fq_dir = Args[-2]
+    align_dir = Args[-1]
+    dirCheck.mkdir(align_dir)
+    options = ' '.join(Args[0:-3])
+    
+    fq_list = getFiles.get_files(fq_dir, "fq")
+    qsub_shells =[]
+    for fq in fq_list:
+	name = os.path.basename(fq)
+	align_shell = "%s\n%s aln %s -f %s/%s.sai %s %s" %\
+		(SGEHEAD, BWA, options, align_dir, name, index, fq)
+	align_shell_name = "aln_%s.sh" % (name)
+
+	qsub_shells.append(makeShell.make_shell\
+		(align_dir, align_shell, align_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=8G")
+
+
+def sam(Args):
+
+    if len(Args) < 2:
+	print "\nUsage:\t\t[pe/se] [options] <alnDir> <samDir>"
+	print "\t\tpe/se:\tsampe or samse [pe]"
+	print "ATTENTION:\tdo not set -f opption(program will auto set it)"
+	if len(Args) == 1 and Args[0] == "se":  #samse
+	    print "Options: -n INT\tmaximum occurrences for one end\n\t\
+ -r STR\tread group header line such as '@RG\\tID:foo\\tSM:bar' [null]"
+	else:
+	    cmd = "%s sampe" % (BWA)
+	    getUsage(cmd)
+	    sys.exit(0)
+	
+    type = "pe"  #pe or se default is pe
+    sam_cmd = "%s sampe" % (BWA)
+    
+    if Args[0] == "se":
+	type = "se"
+	sam_cmd = "%s samse" % (BWA)
+	del Args[0]
+    elif Args[0] == "pe":
+	del Args[0]
+	
+    aln_dir = Args[-2]
+    sam_dir = Args[-1]
+    dirCheck.mkdir(sam_dir)
+    options = ' '.join(Args[0:-2])
+    
+    qsub_shells = []
+
+    if type == "se":
+	cat_cmd = "cat %s/aln_*.sh | awk \'!/^#/\'" % (aln_dir)
+	(status, output) = commands.getstatusoutput(cat_cmd)
+
+	if status == 0:
+	    aln_shell_list = output.split("\n")
+	    for aln_shell in aln_shell_list:
+		aln_shell = aln_shell.rstrip()
+		aln_shell = aln_shell.split()
+		fq = aln_shell[-1]
+		prefix = aln_shell[-2]
+		sai = aln_shell[-3]
+		name = fq.split('/')[-1]
+				
+		samse_shell = "%s\n%s %s -f %s/%s.sai.sam %s %s %s" %\
+			(SGEHEAD, sam_cmd, options, sam_dir, name, prefix, sai, fq)
+		samse_shell_name = "samse_%s.sh" % (name)
+		
+		qsub_shells.append(makeShell.make_shell\
+			(sam_dir, samse_shell, samse_shell_name))
+				
+	else:
+	    sys.stderr.write("[%s] cat error: id %d, info: %s\n" %\
+		    (time.ctime(), status, output))
+	    sys.exit(1)
+	
+    else: #sampe
+	cat_cmd = "cat %s/aln_*1.fq.sh | awk \'!/^#/\'" % (aln_dir)
+	(status, output) = commands.getstatusoutput(cat_cmd)
+
+        if status == 0:
+	    aln_1_shell_list = output.split("\n")
+	    for aln_1_shell in aln_1_shell_list:
+		aln_1_shell = aln_1_shell.rstrip()
+		aln_1_shell = aln_1_shell.split()
+		fq_1 = aln_1_shell[-1]
+		prefix = aln_1_shell[-2]
+		sai_1 = aln_1_shell[-3]
+		fq_2 = fq_1.replace("1.fq", "2.fq")
+		sai_2 = sai_1.replace("1.fq", "2.fq")
+		name = fq_1.split('/')[-1]
+
+		sampe_shell = "%s\n%s %s -f %s/%s.sai.sam %s %s %s %s %s" %\
+			(SGEHEAD, sam_cmd, options, sam_dir, name, prefix,\
+			sai_1, sai_2, fq_1, fq_2)
+		sampe_shell_name = "sampe_%s.sh" % (name)
+
+		qsub_shells.append(makeShell.make_shell\
+			(sam_dir, sampe_shell, sampe_shell_name))
+
+        else:
+	    sys.stderr.write("[%s] cat error: id %d, info: %s\n" %\
+		    (time.ctime(), status, output))
+	    sys.exit(1)
+	
+    manJob.manJobs(qsub_shells, "-cwd -l vf=8G")
+
+
+def division(Args):
+
+    if not Args:
+	print "usage:\t<pe/se> <sampleName> <samDir> <divisionDir>"
+	sys.exit(0)
+	
+    pe_or_se = Args[0]
+    sample_name = Args[1]
+    sam_dir = Args[2]
+    division_dir = Args[3]
+    dirCheck.mkdir(division_dir)
+
+    qsub_shells = []
+    division_shell = ''
+    division_shell_name = ''
+    if pe_or_se == "pe":
+	division_shell = "%s\npython %s %s %s %s\n" %\
+		(SGEHEAD, DIVISIONPE, sam_dir, division_dir, sample_name)
+	division_shell_name = "divisionpe_%s.sh" % (sample_name)
+    else:
+	division_shell = "%s\npython %s %s %s %s\n" %\
+		(SGEHEAD, DIVISIONSE, sam_dir, division_dir, sample_name)
+	division_shell_name = "divisionse_%s.sh" % (sample_name)
+
+    qsub_shells.append(makeShell.make_shell\
+	    (division_dir, division_shell, division_shell_name))
+    manJob.manJobs(qsub_shells, "-cwd -l vf=8G")
+
+
+def sort(Args):
+    
+    if not Args:
+	print "usage:\t<divisionDir> <sortDir>"
+	sys.exit(0)
+	
+    division_dir = Args[0]
+    sort_dir = Args[1]
+    dirCheck.mkdir(sort_dir)
+
+    division_list = getFiles.get_files(division_dir, "sam")
+    qsub_shells = []
+
+    for division in division_list:
+	name = os.path.basename(division)
+	division_bam = "%s/%s.bam" % (sort_dir, name)
+	sort_bam = "%s.sort" % (division_bam)
+
+	sort_shell = "%s\n%s view -Sb %s -o %s\n%s sort %s %s" %\
+		(SGEHEAD, SAMTOOLS, division, division_bam, SAMTOOLS,\
+		division_bam, sort_bam)
+	sort_shell_name = "sort_%s.sh" % (name)
+
+	qsub_shells.append(makeShell.make_shell\
+		(sort_dir, sort_shell, sort_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=4G")
+		
+
+def consensus(Args):
+    
+    if not Args:
+	print "\nUsage:\t[options] <sortDir> <referenceDir> <consensusDir>"
+	cmd = "%s mpileup" % (SAMTOOLS)
+	getUsage(cmd)
+	sys.exit(0)
+	
+    options = ' '.join(Args[0:-3])
+    sort_dir = Args[-3]
+    reference_dir = Args[-2]
+    cns_dir = Args[-1]
+    dirCheck.mkdir(cns_dir)
+	
+    sort_file_list = getFiles.get_files(sort_dir, "sort.bam")
+    qsub_shells = []
+
+    for sort_file in sort_file_list:
+	sort_file = sort_file.rstrip()
+	basename = os.path.basename(sort_file)
+	name = basename.split('.')[0]
+	reference = reference_dir + '/' + name.split('_')[-1] + ".fa"
+	cns_file = cns_dir + '/' + name + ".cns"
+			
+	cns_shell = "%s\n%s mpileup %s -f %s %s > %s" %\
+		(SGEHEAD, SAMTOOLS, options, reference, sort_file, cns_file)
+	cns_shell_name = "mpileup_%s.sh" % (name)
+
+	qsub_shells.append(makeShell.make_shell\
+		(cns_dir, cns_shell, cns_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=4G")
+
+
+def snp(Args):
+
+    usage = "snp [options] <cnsDir> <snpDir>"
+    parser = OptionParser(usage)
+    parser.add_option("-l", "--read_length",
+	    dest = "rlen",
+	    type = "int",
+	    help = "read length[90]",
+	    default = 90
+	    )
+    parser.add_option("-b", "--min_baq",
+	    dest = "min_baq",
+	    type = "int",
+	    help = "minimal baq to detect snp[15]",
+	    default = 15
+	    )
+    parser.add_option("-m", "--min_maq",
+	    dest = "min_maq",
+	    type = "int",
+	    help = "minimal maq to detect snp[32]",
+	    default = 32
+	    )
+    parser.add_option("-r", "--min_rate",
+	    dest = "min_rate",
+	    type = "float",
+	    help = "minimal rate of snp[0.1]",
+	    default = 0.1
+	    )
+    parser.add_option("-d", "--max_depth",
+	    dest = "max_depth",
+	    type = "int",
+	    help = "maximal depth to detect snp[100]",
+	    default = 100
+	    )
+    parser.add_option("-w", "--wgd_dir",
+	    dest = "wgd",
+	    type = "string",
+	    help = "wgd directory",
+	    default = "-"
+	    )
+
+    if not Args:
+	print >>sys.stderr, parser.print_help()
+	sys.exit(0)
+	
+    snp_dir = Args[-1]
+    cns_dir = Args[-2]
+
+    (options, args) = parser.parse_args(args = Args)
+	
+    read_length = options.rlen
+    min_baq = options.min_baq
+    min_maq = options.min_maq
+    snp_rate = options.min_rate
+    max_depth = options.max_depth
+    wgd_dir = options.wgd
+
+    dirCheck.mkdir(snp_dir)
+	
+    cns_list = getFiles.get_files(cns_dir, "cns")
+    qsub_shells = []
+    for cns in cns_list:
+	base_name = os.path.basename(cns).replace(".cns", "")
+	chrom = base_name.split("_")[-1]
+	if wgd_dir == '-':
+	    snp_shell = "%s\npython %s %s %s %d %d %.2f %d %d %s/%s.snp" %\
+		    (SGEHEAD, SNP, cns, wgd_dir, min_baq, min_maq, snp_rate,\
+		    read_length, max_depth, snp_dir, base_name)
+	else:
+	    snp_shell = "%s\npython %s %s %s/%s.wgd %d %d %.2f %d %d %s/%s.snp" %\
+		    (SGEHEAD, SNP, cns, wgd_dir, chrom, min_baq, min_maq, snp_rate,\
+		    read_length, max_depth, snp_dir, base_name)
+
+	snp_shell_name = "snp_%s.sh" % (base_name)
+	qsub_shells.append(makeShell.make_shell\
+		(snp_dir, snp_shell, snp_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=2G")
+
+
+def indel(Args):
+    
+    if not Args:
+	print "Usage:\tindel <sortDir> <referenceDir> <indelDir>"
+	sys.exit(0)
+	
+    sort_dir = Args[0]
+    ref_dir = Args[1]
+    indel_dir = Args[2]
+
+    indel_cmd = "python %s %s %s %s" % (INDEL, sort_dir, ref_dir, indel_dir)
+    work(indel_cmd)
+
+
+############################################################
+USAGE = """
+Program: genome re-sequencing pipeline, detect SNP and Indel
+
+Usage:	 resequencing <command> [option] 
+
+Command: align		do alignment with bwa
+	 sam		sampe or samse
+	 division	divide align result by chromosome
+	 sort		sort division results
+	 consensus	consensus sequence
+	 snp		calling snp
+	 indel		calling indel
+
+Ver:\tV1.4
+Author:\tChen Jiehu <chenjiehu@scgene.com>
+"""
+############################################################
+
+if __name__ == "__main__":
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "align":
+	align(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "sam":
+	sam(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "division":
+	division(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "sort":
+	sort(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "consensus":
+	consensus(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "snp":
+	snp(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "indel":
+	indel(sys.argv[2:])
+    else:
+	print USAGE
+	sys.exit(0)
+
+
+
+############################################################
+# dindel.py
+############################################################
+
+#! /usr/bin/python
+
+import sys
+import re
+import os
+
+#import other module
+sys.path.append("/scgene/elephant/pipeline/python/module")
+import manJob
+import getFiles
+import dirCheck
+import makeShell
+
+BIN = sys.argv[0]
+PATH = os.path.dirname(BIN)
+PATH = PATH.rstrip()
+if PATH == "":
+    PATH = "."
+DINDEL = PATH + "/dindel-1.01-linux-64bit"
+MAKEWINDOW = PATH + "/makeWindows.py"
+MERGEOPDIPLOID = PATH + "/mergeOutputDiploid.py"
+FILTER = PATH + "/filter_indel.py"
+SGEHEAD = "#$ -S /bin/sh\n#! /bin/bash"
+
+def stage1(sort_dir, ref_dir, tem_dir):
+    stage1_dir = tem_dir + "/stage1"
+    dirCheck.mkdir(stage1_dir)
+    bam_files = getFiles.get_files(sort_dir, "sort.bam")
+    qsub_shells = []
+    for bam in bam_files:
+        name = os.path.basename(bam)
+        base_name = name.split('.')[0]
+        chrom = base_name.split('_')[-1]
+        shell = "%s\n%s --analysis getCIGARindels --bamFile %s --outputFile %s/%s_dindel_output --ref %s/%s.fa" %\
+                (SGEHEAD, DINDEL, bam, stage1_dir, base_name, ref_dir, chrom)
+        shell_name = "dindel_%s_stage1.sh" % (base_name)
+        qsub_shells.append(makeShell.make_shell(stage1_dir, shell, shell_name))
+    manJob.manJobs(qsub_shells, "-cwd -l vf=2G")
+    return stage1_dir
+
+
+def stage2(stage1_dir, tem_dir):
+    stage2_dir = tem_dir + "/stage2"
+    dirCheck.mkdir(stage2_dir)
+    stage1_files = getFiles.get_files(stage1_dir, "variants.txt")
+    qsub_shells = []
+    for stage1_file in stage1_files:
+        name = os.path.basename(stage1_file)
+        base_name = "_".join(name.split("_")[:-2])
+        shell = "%s\npython %s --inputVarFile %s --windowFilePrefix %s/%s.realign_windows --numWindowsPerFile 1000" %\
+                (SGEHEAD, MAKEWINDOW, stage1_file, stage2_dir, base_name)
+        shell_name = "dindel_%s_stage2.sh" % (base_name)
+        qsub_shells.append(makeShell.make_shell(stage2_dir, shell, shell_name))
+    manJob.manJobs(qsub_shells, "-cwd -l vf=2G")
+    return stage2_dir
+
+
+def stage3(sort_dir, ref_dir, stage1_dir, stage2_dir, tem_dir):
+    stage3_dir = tem_dir + "/stage3"
+    dirCheck.mkdir(stage3_dir)
+    bam_files = getFiles.get_files(sort_dir, "sort.bam")
+    qsub_shells = []
+    for bam in bam_files:
+        name = os.path.basename(bam)
+        base_name = name.split('.')[0]
+        chrom = base_name.split('_')[-1]
+        windows = getFiles.get_files(stage2_dir, base_name + ".realign*")
+        for window in windows:
+            window_name = ".".join(window.split("_")[-1].split(".")[:-1])
+            shell = ("%s\n%s --analysis indels --doDiploid --bamFile %s --ref\
+ %s/%s.fa --varFile %s --libFile %s/%s_dindel_output.libraries.txt --outputFile\
+ %s/%s.%s" % (SGEHEAD, DINDEL, bam, ref_dir, chrom, window,\
+                    stage1_dir, base_name, stage3_dir, base_name,\
+                    window_name))
+            shell_name = "dindel_%s_%s_stage3.sh" % (base_name, window_name)
+            qsub_shells.append(makeShell.make_shell(stage3_dir, shell,\
+                    shell_name))
+    manJob.manJobs(qsub_shells, "-cwd -l vf=1G")
+    return stage3_dir
+
+
+def stage4(ref_dir, stage3_dir, tem_dir):
+    stage4_dir = tem_dir + "/stage4"
+    dirCheck.mkdir(stage4_dir)
+    refs = getFiles.get_files(ref_dir, "chr*.fa")
+    qsub_shells = []
+    for ref in refs:
+        chrom = os.path.basename(ref).split(".")[0]
+        windows = getFiles.get_files(stage3_dir, "*" + chrom + ".*.txt")
+        sample = "_".join(os.path.basename(windows[0]).split("_")[:-1])
+        file_list = stage4_dir + "/" + sample + "_" + chrom + ".list"
+        LIST = open(file_list, 'w')
+        LIST.write("%s" % "\n".join(windows))
+        LIST.close()
+        shell = "%s\npython %s --inputFiles %s --outputFile\
+ %s/%s_%s.variantCalls.vcf --refFile %s" % (SGEHEAD, MERGEOPDIPLOID,\
+                file_list, stage4_dir, sample, chrom, ref)
+        shell_name = "dindel_%s_%s_stage4.sh" % (sample, chrom)
+        qsub_shells.append(makeShell.make_shell(stage4_dir, shell, shell_name))
+    manJob.manJobs(qsub_shells, "-cwd -l vf=2G")
+    return stage4_dir
+
+
+def filt(stage4_dir, dindel_dir):
+    raw_indels = getFiles.get_files(stage4_dir, "variantCalls.vcf")
+    shell_address = dindel_dir + "/filter_indel.sh"
+    SHELL = open(shell_address, 'w')
+    SHELL.write("%s\n" % (SGEHEAD))
+    for raw_indel in raw_indels:
+        indel = dindel_dir + "/" + os.path.basename(raw_indel).split(".")[0]\
+                + "_indel.xls"
+        SHELL.write("python %s %s %s" % (FILTER, raw_indel, indel))
+    SHELL.close()
+    manJob.manJobs([shell_address], "-cwd -l vf=1G")
+
+
+def main(sort_dir, ref_dir, dindel_dir):
+    dirCheck.mkdir(dindel_dir)
+    tem_dir = dindel_dir + "/tem"
+    dirCheck.mkdir(tem_dir)
+    stage1_dir = stage1(sort_dir, ref_dir, tem_dir)
+    stage2_dir = stage2(stage1_dir, tem_dir)
+    stage3_dir = stage3(sort_dir, ref_dir, stage1_dir, stage2_dir, tem_dir)
+    stage4_dir = stage4(ref_dir, stage3_dir, tem_dir)
+    filt(stage4_dir, dindel_dir)
+
+
+if len(sys.argv) > 1:
+    main(sys.argv[1], sys.argv[2], sys.argv[3])
+else:
+    print >>sys.stderr, "python %s <sort_dir> <ref_dir> <indel_dir>" %\
+    (sys.argv[0])
+
+
+
+############################################################
+# filter_indel.py
+############################################################
+
+#! /usr/bin/python
+import sys
+import re
+
+def main(raw_indel, indel):
+    INDEL = open(indel, 'w')
+    INDEL.write("CHROM\tPOS\tREF\tALT\tINDEL_QUAL\tReads(most_\
+stringent)\tHom/Het\tGQ\tHP\n")
+    for line in open(raw_indel):
+        line = line.rstrip()
+        if re.search("^#", line):
+            continue
+        (chrom, pos, iid, ref, alt, qua, ffilter, info, fformat, sample) =\
+        line.split()
+        if ffilter != "PASS":
+            continue
+        ref_len = len(ref)
+        alt_len = len(alt)
+        qua = int(qua)
+        if ref_len > 10 or alt_len > 10:
+            continue
+        if qua < 20:
+            continue
+        (dp, nf, nr, nrs, nfs, hp) = info.split(";")
+        dp = int(dp.split("=")[-1])
+        nf = int(nf.split("=")[-1])
+        nr = int(nr.split("=")[-1])
+        nrs = int(nrs.split("=")[-1])
+        nfs = int(nfs.split("=")[-1])
+        hp = int(hp.split("=")[-1])
+        (gt, gq) = sample.split(":")
+        gq = int(gq)
+        if hp > 10:
+            continue
+        if nf + nr <= 3:
+            continue
+        if gq <= 4:
+            continue
+        hom_het = "HET"
+        if gt == "1/1":
+            hom_het = "HOM"
+        nf_nr = nf + nr
+        INDEL.write("%s\t%s\t%s\t%s\t%d\t%d\t%s\t%d\t%d\n" % (chrom, pos, ref,\
+                alt, qua, nf_nr, hom_het, gq, hp))
+    INDEL.close()
+
+
+if (len(sys.argv) > 1):
+    main(sys.argv[1], sys.argv[2])
+else:
+    print >>sys.stderr, "python %s <raw_indel> <indel>" % (sys.argv[0])
+
+
+
+############################################################
+# snp.py
+############################################################
+
+#! /usr/bin/python
+
+import sys
+import re
+import sys
+import math
+
+def qualitySta(quality):
+    qualitys = []
+    for i in range(len(quality)):
+        per_quality = int(ord(quality[i])) - 33
+        qualitys.append(per_quality)
+    return qualitys
+
+
+def avgQuality(qualitys):
+    qua_num = len(qualitys)
+    avg_qua = 0
+    if qua_num > 0:
+        total_qua = 0
+        for qua in qualitys:
+            total_qua += qua
+        avg_qua = total_qua / qua_num
+    return avg_qua
+
+
+def consensusMatchAnalysis(match):
+    matchs = []
+    largest_indel = 0
+    while True:
+        add_len = 1
+        alt = match[0]
+        pre_alt = ''
+        if len(match) > 1:
+            pre_alt = match[1]
+        if alt == '+' or alt == '-':  #indel
+            if ord(match[1]) >= 48 and ord(match[1]) <= 57:
+                if int(match[1]) > largest_indel:
+                    largest_indel = int(match[1])
+                add_len = int(match[1]) + 2
+                if ord(match[2]) >= 48 and ord(match[2]) <= 57:
+                    add_len = int(match[1:3]) + 3
+                    if int(match[1:3]) > largest_indel:
+                        largest_indel = int(match[1:3])
+        elif alt == '^':  #begin
+            add_len = 3
+        elif pre_alt == '$':  #end
+            add_len = 2
+        alt = match[:add_len]
+        match = match[add_len:]
+
+        if not re.search('^[+-]', alt):
+            matchs.append(alt)
+        if match == '':
+            break
+
+    return (matchs, largest_indel)
+
+
+def consensusAnalysis(line, read_len):
+
+    (chrom, coordinate, reference, depth, match, baq_quality, map_quality,\
+            position) = line.split()
+
+    (matchs, indel_size) = consensusMatchAnalysis(match)
+    map_qualitys = qualitySta(map_quality)
+    baq_qualitys = qualitySta(baq_quality)
+    positions = position.split(',')
+
+    if len(matchs) != len(map_qualitys) or len(matchs) != len(positions) or\
+            len(matchs) != len(baq_qualitys):  #check above analysis
+        print >>sys.stderr, "statistics error at coordinate: ", coordinate
+        sys.exit(1)
+
+    match_dic = {'A' : [0, 0, 0, [], []],
+            'T' : [0, 0, 0, [], []],
+            'G' : [0, 0, 0, [], []],
+            'C' : [0, 0, 0, [], []]
+            }  #total, forward, reverse, baqs, maqs
+
+    for i in range(len(matchs)):
+        per_match = matchs[i]
+        per_maq_qua = map_qualitys[i]
+        per_baq_qua = baq_qualitys[i]
+        per_position = int(positions[i])
+
+        maq_lower = 0
+        if per_position < 5 or per_position + 4 > read_len:
+            maq_lower = -10
+
+        match_base = ''
+        if len(per_match) == 1:
+            match_base = per_match
+
+        elif re.search('^\^', per_match):
+            match_base = per_match[-1]
+            maq_lower = -15
+
+        elif re.search('\$$', per_match):
+            match_base = per_match[0]
+            maq_lower = -15
+
+        if match_base == '':
+            print >>sys.stderr, match
+            sys.exit(1)
+        else:
+            if match_base == '.':
+                match_base = reference
+            elif match_base == ',':
+                match_base = reference.lower()
+            elif match_base == 'N' or match_base == 'n':
+                continue
+            elif match_base == '>' or match_base == '<':
+                continue
+            elif match_base != '*':
+                match_base = match_base
+            else:
+                continue
+
+            per_maq_qua += maq_lower
+
+            if per_maq_qua < 0:
+                per_maq_qua = 0
+
+            if match_base in match_dic:  #forward
+                match_dic[match_base][1] += 1
+            else:  #reverse
+                match_dic[match_base.upper()][2] += 1
+
+            match_dic[match_base.upper()][0] += 1
+            match_dic[match_base.upper()][3].append(per_baq_qua)
+            match_dic[match_base.upper()][4].append(per_maq_qua)
+
+    return (match_dic, indel_size)
+
+
+def baseAnalysisX(chrom, coordinate, ref, match_dic, min_baq_avg, min_maq_avg):
+    new_matchs = sorted(match_dic.items(), key = lambda d:d[1][0])
+    base1 = new_matchs[-1][0]
+    base1_depth = new_matchs[-1][1][0]
+    base1_depth_forward = new_matchs[-1][1][1]
+    base1_depth_reverse = new_matchs[-1][1][2]
+    base1_baq_avg = avgQuality(new_matchs[-1][1][3])
+    base1_maq_avg = avgQuality(new_matchs[-1][1][4])
+
+    base2 = new_matchs[-2][0]
+    base2_depth = new_matchs[-2][1][0]
+    base2_depth_forward = new_matchs[-2][1][1]
+    base2_depth_reverse = new_matchs[-2][1][2]
+    base2_baq_avg = avgQuality(new_matchs[-2][1][3])
+    base2_maq_avg = avgQuality(new_matchs[-2][1][4])
+
+    low_quality_info = "LOWQUA\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%d\
+\t%d\t%d\t%d" % (chrom, coordinate, ref, base1, base1_depth,\
+            base1_depth_forward, base1_depth_reverse, base1_baq_avg,\
+            base1_maq_avg, base2, base2_depth, base2_depth_forward,\
+            base2_depth_reverse, base2_baq_avg, base2_maq_avg)
+
+    is_mismatch = 0
+    if (base1 != ref and base1_depth != 0) or\
+            (base2 != ref and base2_depth != 0):
+        is_mismatch = 1
+
+    is_low_quality = 0
+    if base1_depth == 0:
+        base1 = 'N'
+        base1_depth = 0
+        base1_depth_forward = 0
+        base1_depth_reverse = 0
+    if base1_baq_avg < min_baq_avg or base1_maq_avg < min_maq_avg:
+        base1 = 'N'
+        base1_depth = 0
+        base1_depth_forward = 0
+        base1_depth_reverse = 0
+        is_low_quality = 1
+
+    if base2_depth == 0 or base1_depth == 0:
+        base2 = 'N'
+        base2_depth = 0
+        base2_depth_forward = 0
+        base2_depth_reverse = 0
+    if base2_baq_avg < min_baq_avg or base2_maq_avg < min_maq_avg:
+        base2 = 'N'
+        base2_depth = 0
+        base2_depth_forward = 0
+        base2_depth_reverse = 0
+        is_low_quality = 1
+
+    if is_mismatch == 1 and is_low_quality == 1:
+        print >>sys.stderr, low_quality_info
+    return (base1, base1_depth, base1_depth_forward, base1_depth_reverse,\
+            base1_baq_avg, base1_maq_avg, base2, base2_depth,\
+            base2_depth_forward, base2_depth_reverse, base2_baq_avg,\
+            base2_maq_avg)
+
+
+def gcPercentage(sequences, read_len):
+    gc_up = 0
+    for i in range(read_len - 10, read_len):
+        if sequences[i] == 'G' or sequences[i] == 'C':
+            gc_up += 1
+
+    gc_up_rate = gc_up / 10.0
+
+    gc_down = 0
+    for j in range(read_len + 1, read_len + 11):
+        if sequences[j] == 'G' or sequences[j] == 'C':
+            gc_down += 1
+    gc_down_rate = gc_down / 10.0
+
+    if abs(gc_up_rate - 0.5) >= abs(gc_down_rate - 0.5):
+        return gc_up_rate
+    else:
+        return gc_down_rate
+
+
+def snpEdge(sequences, base1, base2, read_len):
+    base1_up = 0
+    base1_down = 0
+    base2_up = 0
+    base2_down = 0
+    for i in range(read_len - 1, -1, -1):
+        if sequences[i] == base1:
+            base1_up += 1
+        else:
+            break
+    for i in range(read_len - 1, -1, -1):
+        if sequences[i] == base2:
+            base2_up += 1
+        else:
+            break
+
+    for j in range(read_len + 1, len(sequences)):
+        if sequences[j] == base1:
+            base1_down += 1
+        else:
+            break
+    for j in range(read_len + 1, len(sequences)):
+        if sequences[j] == base2:
+            base2_down += 1
+        else:
+            break
+    return (base1_up, base1_down, base2_up, base2_down)
+
+
+def modDepth(depths, read_length):
+    depth_dic = {}
+    for i in range(read_length - 10, read_length + 11):
+        depth = depths[i]
+        if depth in depth_dic:
+            depth_dic[depth] += 1
+        else:
+            depth_dic[depth] = 1
+    mod_depth = sorted(depth_dic.items(), key = lambda d:d[1])[-1][0]
+    return mod_depth
+
+
+def mismatchDensity(mismatch_distribution, coordinates, window, read_len):
+    #analysis read length position
+    #window = read_len * 2 - 1
+    mismatch_sta = 0
+    shortest_distance = 1000  #means very large
+    for i in range(window):
+        if mismatch_distribution[i] > 0:  #> 1 maybe better
+            mismatch_sta += 1
+            difference = abs(mismatch_distribution[i] - mismatch_distribution\
+                    [read_len]) / float(mismatch_distribution[i] +\
+                    mismatch_distribution[read_len])
+            if difference < 0.6:
+                distance = abs(coordinates[i] - coordinates[read_len]) - 1
+                if distance > -1 and distance < shortest_distance:
+                    shortest_distance = distance
+    return (mismatch_sta, shortest_distance)
+
+
+def baseSequencingAnalysis(base1, depth1, depth1_forward, depth1_reverse,\
+        avg_baq1, avg_maq1, forward_duplication1, reverse_duplication1,\
+        base2, depth2, depth2_forward, depth2_reverse, avg_baq2, avg_maq2,\
+        forward_duplication2, reverse_duplication2, error_info):
+
+        error_rate = 0.05  #allert error rate is 0.05 ~ Q13
+        depth = depth1 + depth2
+
+        is_sequencing_error1 = 0
+        duplication1 = forward_duplication1
+        if reverse_duplication1 > duplication1:
+            duplication1 = reverse_duplication1
+        error_depth1 = depth * error_rate * (duplication1 ** duplication1)
+        if error_depth1 >= (depth1 - 1):  #sequencing error 1
+            is_sequencing_error1 = 1
+        if depth1_forward * depth1_reverse == 0:  #sequencing error 2
+            if duplication1 > 0 and avg_baq1 < 26:
+                is_sequencing_error1 = 1
+        if is_sequencing_error1 == 1:
+            base1 = 'N'
+            depth1 = 0
+            depth1_forward = 0
+            depth1_reverse = 0
+
+        is_sequencing_error2 = 0
+        duplication2 = forward_duplication2
+        if reverse_duplication2 > duplication2:
+            duplication2 = reverse_duplication2
+        error_depth2 = depth * error_rate * (duplication2 ** duplication2)
+        if error_depth2 >= (depth2 - 1):  #sequencing error 1
+            is_sequencing_error2 = 1
+        if depth2_forward * depth2_reverse == 0:  #sequencing error 2
+            if duplication2 > 0 and avg_baq2 < 26:
+                is_sequencing_error2 = 1
+        if is_sequencing_error2 == 1:
+            base2 = 'N'
+            depth2 = 0
+            depth2_forward = 0
+            depth2_reverse = 0
+
+        if is_sequencing_error1 == 1 or is_sequencing_error2 == 1:
+            print >>sys.stderr, 'SEQUENCINGERROR', error_info
+        return (base1, depth1, depth1_forward, depth1_reverse, base2, depth2,\
+                depth2_forward, depth2_reverse)
+
+
+def baseChange(base1, base1_depth, base1_depth_forward, base1_depth_reverse,\
+        base2, base2_depth, base2_depth_forward, base2_depth_reverse,\
+        reference):
+    is_change = 0
+    if base1_depth > 0 and base2_depth > 0:
+        if base2 == reference:
+            is_change = 1
+        elif base1 != reference and base2 != reference and\
+                (base2_depth > base1_depth):
+            is_change = 1
+    elif base1_depth == 0 and base2_depth > 0:
+        if base2 != reference:
+            base1 = reference
+        else:
+            print >>sys.stderr, 'base change error 1', base1, base1_depth,\
+                    base1_depth_forward, base1_depth_reverse, base2,\
+                    base2_depth, base2_depth_forward, base2_depth_reverse,\
+                    reference
+    elif base1_depth > 0 and base2_depth == 0:
+        if base1 != reference:
+            base2 = reference
+            is_change = 1
+        else:
+            print >>sys.stderr, 'base change error 2', base1, base1_depth,\
+                    base1_depth_forward, base1_depth_reverse, base2,\
+                    base2_depth, base2_depth_forward, base2_depth_reverse,\
+                    reference
+
+    if is_change == 1:
+        tem_base1 = base1
+        tem_base1_depth = base1_depth
+        tem_base1_depth_forward = base1_depth_forward
+        tem_base1_depth_reverse = base1_depth_reverse
+
+        base1 = base2
+        base1_depth = base2_depth
+        base1_depth_forward = base2_depth_forward
+        base1_depth_reverse = base2_depth_reverse
+
+        base2 = tem_base1
+        base2_depth = tem_base1_depth
+        base2_depth_forward = tem_base1_depth_forward
+        base2_depth_reverse = tem_base1_depth_reverse
+
+    return (base1, base1_depth, base1_depth_forward, base1_depth_reverse,\
+            base2, base2_depth, base2_depth_forward, base2_depth_reverse)
+
+
+def baseAnalysisY(pileup, min_baq, min_maq, min_rate, read_len, max_depth):
+    snp_for_z = []  #baseAnalysisY result to next step
+    matchs = []  #do not analysis low quality match reads now
+    coordinates = []
+    sequences = []
+    mismatch_distribution = []
+    depths = []
+    window = read_len * 2 - 1
+    local_indel_dic = {}
+
+    for line in open(pileup):
+        line = line.rstrip()
+        ref = line.split()[2]
+        chrom = line.split()[0]
+        coordinate = int(line.split()[1])
+
+        coordinates.append(coordinate)
+        sequences.append(ref)
+
+        (match_dic, indel_size) = consensusAnalysis(line, read_len)
+
+        if indel_size > 0: #local_indel
+            for i in range(coordinate, coordinate + indel_size):
+                local_indel_dic[i] = 0
+
+        (base1, base1_depth, base1_depth_forward, base1_depth_reverse,\
+                base1_baq_avg, base1_maq_avg, base2, base2_depth,\
+                base2_depth_forward, base2_depth_reverse, base2_baq_avg,\
+                base2_maq_avg) = baseAnalysisX(chrom, coordinate, ref,\
+                match_dic, min_baq, min_maq)
+
+        matchs.append((base1, base1_depth, base1_depth_forward,\
+                base1_depth_reverse, base1_baq_avg, base1_maq_avg,\
+                base2, base2_depth, base2_depth_forward, base2_depth_reverse,\
+                base2_baq_avg, base2_maq_avg))
+
+        mismatch = 0
+        if base1 != 'N' and base1 != ref:
+            mismatch = base1_depth
+        elif base2 != 'N' and base2 != ref:
+            mismatch = base2_depth
+        mismatch_distribution.append(mismatch)
+
+        depths.append(base1_depth + base2_depth)
+
+        if len(coordinates) == window:  #analysis at middle (read len position)
+
+            if mismatch_distribution[read_len] > 0: #find a mismatch
+                m_coordinate = coordinates[read_len]
+                m_reference = sequences[read_len]
+                m_depth = depths[read_len]
+
+                (mismatch_density, shorest_mismatch_distance)= mismatchDensity\
+                        (mismatch_distribution, coordinates, window, read_len)
+
+                gc_rate = gcPercentage(sequences, read_len) #find highest gc rate
+
+                (m_base1, m_base1_depth, m_base1_depth_forward,\
+                        m_base1_depth_reverse, m_base1_baq_avg,\
+                        m_base1_maq_avg, m_base2, m_base2_depth,\
+                        m_base2_depth_forward, m_base2_depth_reverse,\
+                        m_base2_baq_avg, m_base2_maq_avg) = matchs[read_len]
+
+                (base1_up, base1_down, base2_up, base2_down) =\
+                        snpEdge(sequences, m_base1, m_base2, read_len)
+
+                mod_depth = modDepth(depths, read_len)
+
+                #all information to show error snp
+                error_snp_info ="%s\t%d\t%s\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t\
+%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.2f\t%d\t%d" % (chrom, m_coordinate,\
+m_reference, m_depth, m_base1, m_base1_depth, m_base1_depth_forward,\
+m_base1_depth_reverse, m_base1_baq_avg, m_base1_maq_avg, m_base2,\
+m_base2_depth, m_base2_depth_forward, m_base2_depth_reverse, m_base2_baq_avg,\
+m_base2_maq_avg, base1_up, base1_down, base2_up, base2_down, mod_depth,\
+gc_rate, mismatch_density, shorest_mismatch_distance)
+
+                #sequencing error
+                (m_base1, m_base1_depth, m_base1_depth_forward,\
+                        m_base1_depth_reverse, m_base2, m_base2_depth,\
+                        m_base2_depth_forward, m_base2_depth_reverse) =\
+                        baseSequencingAnalysis(m_base1, m_base1_depth,\
+                        m_base1_depth_forward, m_base1_depth_reverse,\
+                        m_base1_baq_avg, m_base1_maq_avg,base1_up, base1_down,\
+                        m_base2, m_base2_depth, m_base2_depth_forward,\
+                        m_base2_depth_reverse, m_base2_baq_avg,\
+                        m_base2_maq_avg, base2_up, base2_down, error_snp_info)
+
+                if (m_base1 != 'N' and m_base1 != m_reference) or\
+                        (m_base2 != 'N' and m_base2 != m_reference):
+                    (m_base1, m_base1_depth, m_base1_depth_forward,\
+                            m_base1_depth_reverse, m_base2, m_base2_depth,\
+                            m_base2_depth_forward, m_base2_depth_reverse) =\
+                            baseChange(m_base1, m_base1_depth,\
+                            m_base1_depth_forward, m_base1_depth_reverse,\
+                            m_base2, m_base2_depth, m_base2_depth_forward,\
+                            m_base2_depth_reverse, m_reference)
+
+                    detect_depth = m_base1_depth + m_base2_depth
+
+                    snp_rate = float(m_base2_depth) / float(detect_depth)
+
+                    if snp_rate >= min_rate and m_base2_depth >= 2 and\
+                            detect_depth <= max_depth:
+                        if m_coordinate in local_indel_dic:
+                            print >>sys.stderr, 'LOCALINDEL', error_snp_info
+                        else:
+                            if snp_rate < 0.4 and (m_base2_depth_forward < 2\
+                                    or m_base2_depth_reverse < 2):
+                                print >>sys.stderr, 'SNPRATE', error_snp_info
+                            else:
+                                all_base_info = [chrom, m_coordinate,\
+                                        m_reference, m_base1, m_base1_depth,\
+                                        m_base1_depth_forward,\
+                                        m_base1_depth_reverse, m_base2,\
+                                        m_base2_depth, m_base2_depth_forward,\
+                                        m_base2_depth_reverse, snp_rate,\
+                                        mismatch_density]
+                                snp_for_z.append(all_base_info)
+
+                    else:
+                        print >>sys.stderr, 'DEPTH', error_snp_info
+                else:
+                    print >>sys.stderr, 'NOTSNP', error_snp_info
+
+            #remove left most base info
+            matchs = matchs[1:]
+            coordinates = coordinates[1:]
+            sequences = sequences[1:]
+            mismatch_distribution = mismatch_distribution[1:]
+            depths = depths[1:]
+
+    return snp_for_z
+
+
+def getWGD(wgd):
+    wgd_dic = {}
+    for line in open(wgd):
+        line = line.rstrip()
+        (chrom, coordinate, wgdup) = line.split()
+        coordinate = int(coordinate)
+        wgdup = int(wgdup)
+        wgd_dic[coordinate] = wgdup
+
+    return wgd_dic
+
+
+def detectSNPDistance(snps):
+    snp_distance_dic = {}
+    for i in range(1, len(snps)):
+        coordinate1 = snps[i - 1][1]
+        coordinate2 = snps[i][1]
+        distance = abs(coordinate2 - coordinate1) - 1
+        if distance < 0:
+            print >>sys.stderr, "ERROR: SNP DISTANCE < 0",\
+                    coordinate1, coordinate2
+            sys.exit(1)
+        if coordinate1 in snp_distance_dic:
+            if snp_distance_dic[coordinate1] > distance:
+                snp_distance_dic[coordinate1] = distance
+        else:
+            snp_distance_dic[coordinate1] = distance
+
+        if coordinate2 in snp_distance_dic:
+            if snp_distance_dic[coordinate2] > distance:
+                snp_distance_dic[coordinate2] = distance
+        else:
+            snp_distance_dic[coordinate2] = distance
+    return snp_distance_dic
+
+
+def joinSNPInfo(snp):
+    (chrom, coordinate, reference, base1, base1_depth, base1_depth_forward,\
+            base1_depth_reverse, base2, base2_depth, base2_depth_forward,\
+            base2_depth_reverse, snp_rate, mismatch_density) = snp
+
+    snp_dic = {"AT" : "W", "TA" : "W",
+            "CG" : "S", "GC" : "S",
+            "TG" : "K", "GT" : "K",
+            "AC" : "M", "CA" : "M",
+            "CT" : "Y", "TC" : "Y",
+            "AG" : "R", "GA" : "R",
+            'A' : 'A', 'T' : 'T', 'G' : 'G', 'C' : 'C'}
+
+    depth = base1_depth + base2_depth
+    if snp_rate > 0.9 and base1_depth <= 2:
+        snp_rate = 1
+
+    snp_base = ''
+    if snp_rate == 1:
+        snp_base = base2
+    else:
+        tem_base = "".join([base1, base2])
+        if tem_base in snp_dic:
+            snp_base = snp_dic[tem_base]
+        else:
+            print >>sys.stderr, 'JOINERROR', chrom, coordinate, reference,\
+                    base1, base1_depth, base1_depth_forward,\
+                    base1_depth_reverse, base2, base2_depth,\
+                    base2_depth_forward, base2_depth_reverse, snp_rate,\
+                    mismatch_density
+            sys.exit(1)
+
+    base1_depth_info = ":".join([str(base1_depth),\
+            ",".join([str(base1_depth_forward), str(base1_depth_reverse)])])
+    base2_depth_info = ":".join([str(base2_depth),\
+            ','.join([str(base2_depth_forward), str(base2_depth_reverse)])])
+
+    return "%s\t%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%.2f\t%d" % \
+            (chrom, coordinate, reference, snp_base, depth, base1,\
+            base1_depth_info, base2, base2_depth_info, snp_rate,\
+            mismatch_density)
+
+
+def snpAnalysisZ(pileup, wgd, min_baq, min_maq, min_rate, read_len, max_depth, output):
+    read_len = int(read_len)
+    max_depth = int(max_depth)
+    min_baq = int(min_baq)
+    min_maq = int(min_maq)
+    min_rate = float(min_rate)
+
+    snps = baseAnalysisY(pileup, min_baq, min_maq, min_rate, read_len, max_depth)
+    snp_distance_dic = detectSNPDistance(snps)
+    wgd_dic = {}
+    if wgd != "-":
+        wgd_dic = getWGD(wgd)
+
+    OUTPUT = open(output, 'w')
+    OUTPUT.write("#chrom\tcoordinate\treference\tSNP\tdepth\tbase1\t\
+base1D:base1FD,base1RD\tbase2\tbase2D:base2FD,base2RD\trate\tmisDensity\t\
+snpDistance\tWGD\n")
+    for snp in snps:
+        snp_info = joinSNPInfo(snp)
+        coordinate = snp[1]
+        coordinate_wgd = 1
+        if wgd != "-":
+            coordinate_wgd = 0
+        elif coordinate in wgd_dic:
+            coordinate_wgd = wgd_dic[coordinate]
+        snp_distance = snp_distance_dic[coordinate]
+        OUTPUT.write("%s\t%d\t%d\n" % (snp_info, snp_distance, coordinate_wgd))
+    OUTPUT.close()
+
+
+if len(sys.argv) < 2:
+    print "snp.py <cns> <wgd> <min_baq> <min_maq> <min_rate> <read_len>\
+ <max_depth> <snp_output>"
+    sys.exit(0)
+else:
+    snpAnalysisZ(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4],\
+            sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8])
+
+
+
+############################################################
+# splitSamPE.py
+############################################################
+
+#! /usr/bin/python
+
+import sys
+import re
+import commands
+import time
+
+
+def getFiles(dir, subfix): #get files by using ls, return file_list
+    cmd = 'ls %s/*%s' % (dir, subfix)
+    (status, output) = commands.getstatusoutput(cmd)
+    if status == 0:
+        file_list = output.split('\n')
+      	return file_list
+    else:
+        sys.stderr.write('[%s] ls get files error: id %d, info: %s\n' %\
+                (time.ctime(), status, output))
+      	sys.exit(1)
+
+
+def splitSam(sam_dir, output_dir, sample_name):
+    is_head = 0
+    sam_list = getFiles(sam_dir, 'sam')
+
+    (status, division_list) =\
+            commands.getstatusoutput('ls %s/*sam' % (output_dir))
+    if status == 0:
+        print >>sys.stderr, "sam files in division directory!"
+        sys.exit(1)
+
+    align_result = {}
+    for sam in sam_list:
+	print >>sys.stderr, "division", sam
+	if is_head == 0:
+	    common_header = []
+	    for line in open(sam):
+	        line = line.rstrip()
+		if re.search('^@SQ', line):
+                    chrom = line.split()[1].split(':')[1]
+                    if chrom in align_result:
+                        print >> sys.stderr, 'chromosome id error', line
+                        sys.exit(1)
+                    align_result[chrom] = [line]
+                elif re.search('^@', line) and not re.search('^@SQ', line):
+                    common_header.append(line)
+                else:
+		    is_head = 1 #finished header detect
+                    break
+
+	    for header in common_header:
+                if re.search('^@HD', header):
+                    for chrom in align_result:
+                        align_result[chrom].insert(0, header)
+                else:
+                    for chrom in align_result:
+                        align_result[chrom].append(header)
+
+        block = 0
+        SAM = open(sam, 'r')
+        while True:
+            line0 = SAM.readline()
+            line1 = ""
+            line0 = line0.rstrip()
+            if len(line0) == 0:
+                break
+            if not re.search("^@", line0):
+                line1 = SAM.readline()
+                line1 = line1.rstrip()
+
+                samflag0 = int(line0.split()[1])
+                samflag1 = int(line1.split()[1])
+                (pair0, chrom0) = getsamflag(samflag0)
+                (pair1, chrom1) = getsamflag(samflag1)
+
+                if chrom0 == '':
+                    chrom0 = line0.split()[2]
+                if chrom1 == '':
+                    chrom1 = line1.split()[2]
+
+                if pair0 != "pair" or pair1 != "pair" or chrom0 != chrom1:
+                    if chrom0 != "unmap":
+                        chrom0 = "unpair"
+                    if chrom1 != "unmap":
+                        chrom1 = "unpair"
+
+                if chrom0 in align_result:
+                    align_result[chrom0].append(line0)
+                else:
+                    align_result[chrom0] = [line0]
+
+                if chrom1 in align_result:
+                    align_result[chrom1].append(line1)
+                else:
+                    align_result[chrom1] = [line1]
+
+                block += 1
+
+            if block == 1000000:
+                output(align_result, output_dir, sample_name)
+                align_result = {}
+                block = 0;
+        SAM.close()
+
+    output(align_result, output_dir, sample_name) #end result
+
+
+
+def getsamflag(samflag):
+    samflag = int(samflag)
+
+    flags = (1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1)
+    pair = 'unpair'
+    chrom = ''
+    for i in range(0, 11): #unmap
+        if flags[i] <= samflag:
+            samflag -= flags[i]
+            if flags[i] == 8 or flags[i] == 4:
+                chrom = 'unmap'
+            if flags[i] == 2:
+                pair = 'pair'
+
+    if pair == 'unpair' and chrom != 'unmap':
+        chrom = 'unpair'
+
+    return (pair, chrom)
+
+
+def output(align_result, output_dir, sample_name):
+    for chrom in align_result:
+        align_output = open\
+                (output_dir + '/' + sample_name + '_' + chrom + '.sam', 'a')
+      	align_output.write("%s\n" % ("\n".join(align_result[chrom])))
+        align_output.close()
+
+
+if len(sys.argv) < 2:
+    print "python splitSam.py <sam_dir> <output_dir> <sample_name>"
+    sys.exit(0)
+else:
+    splitSam(sys.argv[1], sys.argv[2], sys.argv[3])
+
+
+
+############################################################
+# splitSamSE.py
+############################################################
+
+#! /usr/bin/python
+
+import sys
+import re
+import commands
+import time
+
+
+def getFiles(dir, subfix): #get files by using ls, return file_list
+    cmd = 'ls %s/*%s' % (dir, subfix)
+    (status, output) = commands.getstatusoutput(cmd)
+    if status == 0:
+        file_list = output.split('\n')
+        return file_list
+    else:
+        sys.stderr.write('[%s] ls get files error: id %d, info: %s\n' %\
+                (time.ctime(), status, output))
+        sys.exit(1)
+
+
+def splitSam(sam_dir, output_dir, sample_name):
+    is_head = 0
+    sam_list = getFiles(sam_dir, 'sam')
+
+    (status, division_list) =\
+            commands.getstatusoutput('ls %s/*sam' % (output_dir))
+    if status == 0:
+        print >>sys.stderr, "sam files in division directory!"
+        sys.exit(1)
+
+    align_result = {}
+    for sam in sam_list:
+        print >>sys.stderr, "division", sam
+        if is_head == 0:
+            common_header = []
+            for line in open(sam):
+                line = line.rstrip()
+                if re.search('^@SQ', line):
+                    chrom = line.split()[1].split(':')[1]
+                    if chrom in align_result:
+                        print >> sys.stderr, 'chromosome id error'
+                        sys.exit(1)
+                    align_result[chrom] = [line]
+		elif re.search('^@', line) and not re.search('^@SQ', line):
+                    common_header.append(line)
+		else:
+                    break
+
+            for header in common_header:
+                if re.search('^@HD', header):
+                    for chrom in align_result:
+                        align_result[chrom].insert(0, header)
+                else:
+                    for chrom in align_result:
+                        align_result[chrom].append(header)
+	    is_head = 1 #finished header detect
+
+	block = 0
+        for line in open(sam):
+            line = line.rstrip()
+            block += 1
+            if not re.search('^@', line):
+                chrom = line.split()[2]
+                if chrom == "*":
+                    chrom = "unmap"
+
+		if chrom in align_result:
+                    align_result[chrom].append(line)
+                else:
+                    align_result[chrom] = [line]
+
+            if block == 1000000:
+                output(align_result, output_dir, sample_name)
+                align_result = {}
+                block = 0;
+	output(align_result, output_dir, sample_name) #end result
+
+
+def output(align_result, output_dir, sample_name):
+    for chrom in align_result:
+        align_output = open\
+                (output_dir + '/' + sample_name + '_' + chrom + '.sam', 'a')
+        align_output.write("%s\n" % ("\n".join(align_result[chrom])))
+	align_output.close()
+
+
+if len(sys.argv) < 2:
+    print "python splitSam.py <sam_dir> <output_dir> <sample_name>"
+    sys.exit(0)
+else:
+    splitSam(sys.argv[1], sys.argv[2], sys.argv[3])
+
+
+
+###################################################
+# manJob.py
+###################################################
+
+#! /usr/bin/python
+import sys
+import os
+import commands
+import time
+
+def qstatJobs(allJobs):
+    while (len(allJobs) > 0):
+	time.sleep(60) #Reversion: V1.1 edit here
+	temJobs = []
+	for jobId in allJobs:
+	    jobId = jobId.rstrip()
+	    cmd = "qstat -j %s" % (jobId)
+	    (qstatSta, qstatOutput) = commands.getstatusoutput(cmd)
+	    if qstatSta == 0: #job is running
+		temJobs.append(jobId)
+	    elif qstatSta == 256: #job is finished
+		sys.stderr.write('[%s] FINISH: %s\n' % (time.ctime(), jobId))
+	    else: #job is error
+		sys.stderr.write('[%s] ERROR: %s\n' % (time.ctime(), jobId))
+	allJobs = temJobs
+
+
+def qsubJobs(jobShell, source):
+    jobShell.rstrip()
+    cmd = "qsub %s %s" % (source, jobShell)
+    (qsubSta, qsubInfo) = commands.getstatusoutput(cmd)
+    time.sleep(1) #it's not good to qsubs so many jobs at the same time
+    qsubId = qsubInfo.split()[2]
+    sys.stderr.write("%s\n" % (cmd))
+    if qsubSta == 0:
+	sys.stderr.write('[%s] qsub SUCCESS: %s\n' % (time.ctime(), qsubInfo))
+	return qsubId
+    else:
+	sys.stderr.write('[%s] qsub ERROR: %s\n' % (time.ctime(), qsubInfo))
+	sys.exit(1)
+
+
+def manJobs(jobShells, sourse):
+    jobsId = []
+    for jobShell in jobShells: #qsub jobs
+	jobsId.append(qsubJobs(jobShell, sourse))
+
+    qstatJobs(jobsId) #qstat jobs
+
+
+
+############################################################
+# getFiles.py
+############################################################
+
+#! /usr/bin/python
+import commands
+import sys
+import time
+
+def get_files(dir, subfix): #get files by using ls, return file_list
+    cmd = 'ls %s/*%s' % (dir, subfix)
+    (status, output) = commands.getstatusoutput(cmd)
+    if status == 0:
+	file_list = output.split('\n')
+	return file_list
+    else:
+	sys.stderr.write('[%s] ls get files error: id %d, info: %s\n' %\
+		(time.ctime(), status, output))
+	sys.exit(1)
+
+
+
+############################################################
+# dirCheck.py
+############################################################
+
+#! /usr/bin/python
+import os
+
+def mkdir(directory):
+    if not os.path.exists(directory):
+	os.mkdir(directory)
+
+
+
+############################################################
+# makeShell.py
+############################################################
+
+#! /usr/bin/python
+
+def make_shell(shell_dir, shell, shell_name): #output shell, return shell add
+    shell_address = '%s/%s' % (shell_dir, shell_name)               
+    shell_output = open(shell_address, 'w')                 
+    shell_output.write('%s\n' % (shell))                            
+    shell_output.close()                                    
+    return shell_address

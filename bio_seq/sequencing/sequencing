@@ -1,0 +1,249 @@
+#! /usr/bin/python
+
+#########################################################
+# Program: sequencing
+# Author: Jiehu Chen
+# Version: 1.0
+# 	Date: Thu Mar 22 17:59:39 CST 2012
+# Reversion: 1.1
+#	Modify: 1. edit to fit SGE
+#	Author: chenjiehu@scgene.com
+#	Date: Wed Apr 18 09:26:01 CST 2012
+# Reversion: 1.2
+#	Modify: update filter program, add parameter -N -B
+#               -N max N number
+#		-B max low quality base number(exclusive N)
+#	Author: chenjiehu@scgene.com
+#       Date:Fri Feb 22 09:00:32 CST 2013
+##########################################################
+
+import sys
+import os
+from optparse import OptionParser
+import commands
+import time
+import re
+
+#import other module
+sys.path.append("/scgene/elephant/pipeline/python/module")
+import manJob
+
+BIN = sys.argv[0]
+PATH = os.path.dirname(BIN) #bin directory
+SUBBIN = PATH + "/subBin/" #subBin directory
+QCHECK = SUBBIN + 'qualityCheck.py'
+TRIM = SUBBIN + 'trim.py'
+FILTER = SUBBIN + 'filterFQ.py'
+REMOVEDUP = SUBBIN + 'removeDuplication.py'
+
+def getFiles(dir, subfixs): #get files by using ls, return file_list
+    file_list = []
+    for subfix in subfixs:
+	cmd = 'ls %s/*%s' % (dir, subfix)
+	(status, output) = commands.getstatusoutput(cmd)
+	if status == 0:
+	    file_list.extend(output.split('\n'))
+    if len(file_list) == 0:
+	sys.stderr.write('[%s] ls get files error: id %d, info: %s\n' %\
+		(time.ctime(), status, output))
+	sys.exit(1)
+    return file_list
+
+
+def makeShell(shell_dir, shell, shell_name): #output shell, return shell address
+    shell_address = '%s/%s' % (shell_dir, shell_name)
+    shell_output = open(shell_address, 'w')
+    shell_output.write('%s\n' % (shell))
+    shell_output.close()
+    return shell_address
+
+
+def getUsage(command):
+    (status, output) = commands.getstatusoutput(command) #print bwa aln options
+    output = output.split('\n')
+    for line in output:
+	if not re.search('Usage', line):
+	  print line
+
+
+def existsDir(directory): #check the output directory exists or not, if not exists, make dir
+    if not os.path.exists(directory):
+	os.mkdir(directory)
+
+
+def qcheck(Args): # sequencing quality check
+    
+    if not Args:
+	print >>sys.stderr, "\nUsage:\tqcheck <fqDir> <outDir>"
+	print >>sys.stderr, "support fq and fq.gz format\n"
+	sys.exit(0)
+	
+    fq_dir = Args[0]
+    out_dir = Args[1]
+    existsDir(out_dir)
+
+    fq_list = getFiles(fq_dir, ('gz', 'fq'))
+    qsub_shells = []
+
+    for fq_file in fq_list:
+	os.path.basename(fq_file)
+	qc_shell = "#$ -S /bin/sh\n#! /bin/bash\npython %s %s %s" % (QCHECK, fq_file, out_dir)
+	qc_shell_name = 'qc_%s.sh' % (os.path.basename(fq_file))
+
+	qsub_shells.append(makeShell(out_dir, qc_shell, qc_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=1G")
+
+
+def trim(Args):
+	usage = "trim [options] <fqDir> <outDir>"
+	parser = OptionParser(usage)
+	parser.add_option(	"-5", "--5length",
+				dest = "flen",
+				type = "int",
+				help = "filter length of 5 upstream[0]",
+				default = 0
+			)
+	parser.add_option(	"-3", "--3length",
+				dest = "tlen",
+				type = "int",
+				help = "filter length of 3 downstream[0]",
+				default = 0
+			)
+
+	if not Args:
+		print >>sys.stderr, parser.print_help()
+		sys.exit(0)
+
+	fq_dir = Args[-2]
+	out_dir = Args[-1]
+	Args = Args[0:-2]
+	
+	(options, args) = parser.parse_args(args = Args)
+	filt5 = options.flen
+	filt3 = options.tlen
+
+	if filt5 == 0 and filt3 == 0:
+		print >>sys.stderr, "not trim any fastq, exit"
+		sys.exit(0)
+
+	existsDir(out_dir)
+	fq_list = getFiles(fq_dir, 'fq')
+	qsub_shells = []
+	for fq in fq_list:
+		fq_name = os.path.basename(fq)
+		trim_shell = "#$ -S /bin/sh\n#! /bin/bash\npython %s %d %d %s %s/%s" % (TRIM, filt5, filt3, fq, out_dir, fq_name)
+		trim_shell_name = "trim_%s.sh" % (fq_name)
+		qsub_shells.append(makeShell(out_dir, trim_shell, trim_shell_name))
+	manJob.manJobs(qsub_shells, "-cwd -l vf=1G")
+
+
+def rmdup(Args):
+	if not Args:
+		print "\nUsage:\trmdup <fqDir> <outDir>\n"
+		sys.exit(0)
+	
+	fq_dir = Args[0]
+	out_dir = Args[1]
+	existsDir(out_dir)
+
+	qsub_shells = []
+	fq_1_list = getFiles(fq_dir, '1.fq')
+	for fq_1 in fq_1_list:
+		fq_2 = fq_1.replace('1.fq', '2.fq')
+		fq_1_name = os.path.basename(fq_1)
+		rmdup_shell = "#$ -S /bin/sh\n#! /bin/bash\npython %s %s %s %s" % (REMOVEDUP, fq_1, fq_2, out_dir)
+		rmdup_shell_name = "rmdup_%s.sh" % (fq_1_name)
+		qsub_shells.append(makeShell(out_dir, rmdup_shell, rmdup_shell_name))
+	manJob.manJobs(qsub_shells, "-cwd -l vf=30G")
+		
+
+def filt(Args):
+    
+    usage = "filt [options] <fqDir> <outDir>"
+    parser = OptionParser(usage)
+    parser.add_option("-Q", "--LowQua",
+	    dest = "lowq",
+	    type = "int",
+	    help = "the min quality[2]",
+	    default = 2
+	    )
+    parser.add_option("-L", "--Length",
+	    dest = "length",
+	    type = "int",
+	    help = "the min length[35]",
+	    default = 35
+	    )
+    parser.add_option("-N", "--NNUM",
+	    dest = "nnum",
+	    type = "int",
+	    help = "the max N*[1]",
+	    default = 1
+	    )
+    parser.add_option("-B", "--LBASE",
+	    dest = "lbase",
+	    type = "int",
+	    help = "the max low quality base(exclusive N)[3]",
+	    default = 3
+	    )
+
+    if not Args:
+	print parser.print_help()
+	sys.exit(0)
+	
+    fq_dir = Args[-2]
+    out_dir = Args[-1]
+    Args = Args[0:-2]
+
+    (options, args) = parser.parse_args(args = Args)
+
+    l_qua = options.lowq
+    l_len = options.length
+    n_num = options.nnum
+    l_base = options.lbase
+	
+    existsDir(out_dir)
+
+    qsub_shells = []
+    fq_1_list = getFiles(fq_dir, ('1.fq', '1.fastq', '1.fq.gz', '1.fastq.gz'))
+    for fq_1 in fq_1_list:
+	fq_2 = fq_1.replace('_1', '_2')
+	filter_shell = "#$ -S /bin/sh\n#! /bin/bash\npython %s %s %s %d %d %d %d %s" %\
+		(FILTER, fq_1, fq_2, l_qua, l_len, n_num, l_base, out_dir)
+	filter_shell_name = 'filter_%s.sh' % (os.path.basename(fq_1))
+
+	qsub_shells.append(makeShell(out_dir, filter_shell, filter_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=1G")
+
+
+############################################################
+USAGE = """
+Program: sequencing pre analysis program
+
+Usage:	 sequencing <command> [option] 
+
+Command: qcheck		statistics fastq and quality check
+	 trim 		trim 5' or 3' sequence (for transcriptome sequencing)
+	 rmdup		remove duplication reads
+	 filt		filt low quality reads with trim
+
+Ver:\tV1.2
+Author:\tChen Jiehu <chenjiehu@scgene.com>
+Date:\tFri Feb 22 09:00:32 CST 2013
+"""
+############################################################
+
+if __name__ == "__main__":
+
+    if len(sys.argv) > 1 and sys.argv[1] == "qcheck":
+	qcheck(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "trim":
+	trim(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "rmdup":
+	rmdup(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "filt":
+	filt(sys.argv[2:])
+    else:
+	print USAGE
+        sys.exit(0)

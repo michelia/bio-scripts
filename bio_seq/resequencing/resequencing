@@ -1,0 +1,410 @@
+#! /usr/bin/python
+
+############################################################
+# Program: resequencing
+# Usage: do requencing analysis with NGS
+# qualityCheck filter align consenseSequence SNP and Indel
+# Author: Chen Jiehu
+# Version: 1.0
+# 	Editor: chenjiehu@scgene.com
+# 	Date: Mon Aug  1 15:37:11 CST 2011
+# Reversion: 1.1
+#       Editor: chenjiehu@scgene.com
+#	Modify:	Add Indel Analysis
+# 	Date: Mon Mar 26 10:55:35 CST 2012
+# Reversion: 1.2
+#       Editor: chenjiehu@scgene.com
+#       Modify: Run jobs in SGE
+#	Date: Mon Apr 16 16:04:56 CST 2012
+# Reversion: 1.3
+# 	Editor: chenjiehu@scgene.com
+#	Modify: bwa update to 0.6.1-r104
+#	Date: Mon Apr 23 14:13:26 CST 2012
+# Reversion: 1.4
+#       Editor: chenjiehu@scgene.com
+#       Modify: division with PE and SE mode
+#       Date: Mon May 21 16:51:28 CST 2012
+############################################################
+
+import sys
+import os
+from optparse import OptionParser
+import commands
+import time
+import re
+
+#import other module
+sys.path.append("/scgene/elephant/pipeline/python/module")
+import manJob
+import getFiles
+import dirCheck
+import makeShell
+
+BIN = sys.argv[0]
+PATH = os.path.dirname(BIN)  #bin directory
+SUBBIN = PATH + "/subBin/"  #subBin directory
+DIVISIONPE = SUBBIN + "/splitSamPE.py"
+DIVISIONSE = SUBBIN + "/splitSamSE.py"
+BWA = SUBBIN + "/bwa"
+SAMTOOLS = SUBBIN + "/samtools"
+SNP = SUBBIN + "/snp.py"
+INDEL = SUBBIN + "/dindel.py"
+SGEHEAD = "#$ -S /bin/sh\n#! /bin/bash"
+
+
+def work(cmd):
+    sys.stderr.write("[%s] Start CMD: %s \n" % (time.ctime(), cmd))
+    os.system(cmd)
+    sys.stderr.write("[%s] Finish CMD: %s \n" % (time.ctime(), cmd))
+
+
+def getUsage(command):
+    (status, output) = commands.getstatusoutput(command)  #print bwa aln options
+    output = output.split("\n")
+    for line in output:
+	if not re.search("Usage", line):
+	    print line
+
+
+def align(Args):  #align with bwa
+    if not Args:
+	print "\nUsage:\t\talign [options] <index> <fqDir> <alignDir>"
+	print "ATTENTION:\tdo not set -f opption(program will auto set it)"
+
+	cmd = "%s aln" % (BWA)
+	getUsage(cmd)
+	sys.exit(0)
+	
+    index = Args[-3]
+    fq_dir = Args[-2]
+    align_dir = Args[-1]
+    dirCheck.mkdir(align_dir)
+    options = ' '.join(Args[0:-3])
+    
+    fq_list = getFiles.get_files(fq_dir, "fq")
+    qsub_shells =[]
+    for fq in fq_list:
+	name = os.path.basename(fq)
+	align_shell = "%s\n%s aln %s -f %s/%s.sai %s %s" %\
+		(SGEHEAD, BWA, options, align_dir, name, index, fq)
+	align_shell_name = "aln_%s.sh" % (name)
+
+	qsub_shells.append(makeShell.make_shell\
+		(align_dir, align_shell, align_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=8G")
+
+
+def sam(Args):
+
+    if len(Args) < 2:
+	print "\nUsage:\t\t[pe/se] [options] <alnDir> <samDir>"
+	print "\t\tpe/se:\tsampe or samse [pe]"
+	print "ATTENTION:\tdo not set -f opption(program will auto set it)"
+	if len(Args) == 1 and Args[0] == "se":  #samse
+	    print "Options: -n INT\tmaximum occurrences for one end\n\t\
+ -r STR\tread group header line such as '@RG\\tID:foo\\tSM:bar' [null]"
+	else:
+	    cmd = "%s sampe" % (BWA)
+	    getUsage(cmd)
+	    sys.exit(0)
+	
+    type = "pe"  #pe or se default is pe
+    sam_cmd = "%s sampe" % (BWA)
+    
+    if Args[0] == "se":
+	type = "se"
+	sam_cmd = "%s samse" % (BWA)
+	del Args[0]
+    elif Args[0] == "pe":
+	del Args[0]
+	
+    aln_dir = Args[-2]
+    sam_dir = Args[-1]
+    dirCheck.mkdir(sam_dir)
+    options = ' '.join(Args[0:-2])
+    
+    qsub_shells = []
+
+    if type == "se":
+	cat_cmd = "cat %s/aln_*.sh | awk \'!/^#/\'" % (aln_dir)
+	(status, output) = commands.getstatusoutput(cat_cmd)
+
+	if status == 0:
+	    aln_shell_list = output.split("\n")
+	    for aln_shell in aln_shell_list:
+		aln_shell = aln_shell.rstrip()
+		aln_shell = aln_shell.split()
+		fq = aln_shell[-1]
+		prefix = aln_shell[-2]
+		sai = aln_shell[-3]
+		name = fq.split('/')[-1]
+				
+		samse_shell = "%s\n%s %s -f %s/%s.sai.sam %s %s %s" %\
+			(SGEHEAD, sam_cmd, options, sam_dir, name, prefix, sai, fq)
+		samse_shell_name = "samse_%s.sh" % (name)
+		
+		qsub_shells.append(makeShell.make_shell\
+			(sam_dir, samse_shell, samse_shell_name))
+				
+	else:
+	    sys.stderr.write("[%s] cat error: id %d, info: %s\n" %\
+		    (time.ctime(), status, output))
+	    sys.exit(1)
+	
+    else: #sampe
+	cat_cmd = "cat %s/aln_*1.fq.sh | awk \'!/^#/\'" % (aln_dir)
+	(status, output) = commands.getstatusoutput(cat_cmd)
+
+        if status == 0:
+	    aln_1_shell_list = output.split("\n")
+	    for aln_1_shell in aln_1_shell_list:
+		aln_1_shell = aln_1_shell.rstrip()
+		aln_1_shell = aln_1_shell.split()
+		fq_1 = aln_1_shell[-1]
+		prefix = aln_1_shell[-2]
+		sai_1 = aln_1_shell[-3]
+		fq_2 = fq_1.replace("1.fq", "2.fq")
+		sai_2 = sai_1.replace("1.fq", "2.fq")
+		name = fq_1.split('/')[-1]
+
+		sampe_shell = "%s\n%s %s -f %s/%s.sai.sam %s %s %s %s %s" %\
+			(SGEHEAD, sam_cmd, options, sam_dir, name, prefix,\
+			sai_1, sai_2, fq_1, fq_2)
+		sampe_shell_name = "sampe_%s.sh" % (name)
+
+		qsub_shells.append(makeShell.make_shell\
+			(sam_dir, sampe_shell, sampe_shell_name))
+
+        else:
+	    sys.stderr.write("[%s] cat error: id %d, info: %s\n" %\
+		    (time.ctime(), status, output))
+	    sys.exit(1)
+	
+    manJob.manJobs(qsub_shells, "-cwd -l vf=8G")
+
+
+def division(Args):
+
+    if not Args:
+	print "usage:\t<pe/se> <sampleName> <samDir> <divisionDir>"
+	sys.exit(0)
+	
+    pe_or_se = Args[0]
+    sample_name = Args[1]
+    sam_dir = Args[2]
+    division_dir = Args[3]
+    dirCheck.mkdir(division_dir)
+
+    qsub_shells = []
+    division_shell = ''
+    division_shell_name = ''
+    if pe_or_se == "pe":
+	division_shell = "%s\npython %s %s %s %s\n" %\
+		(SGEHEAD, DIVISIONPE, sam_dir, division_dir, sample_name)
+	division_shell_name = "divisionpe_%s.sh" % (sample_name)
+    else:
+	division_shell = "%s\npython %s %s %s %s\n" %\
+		(SGEHEAD, DIVISIONSE, sam_dir, division_dir, sample_name)
+	division_shell_name = "divisionse_%s.sh" % (sample_name)
+
+    qsub_shells.append(makeShell.make_shell\
+	    (division_dir, division_shell, division_shell_name))
+    manJob.manJobs(qsub_shells, "-cwd -l vf=8G")
+
+
+def sort(Args):
+    
+    if not Args:
+	print "usage:\t<divisionDir> <sortDir>"
+	sys.exit(0)
+	
+    division_dir = Args[0]
+    sort_dir = Args[1]
+    dirCheck.mkdir(sort_dir)
+
+    division_list = getFiles.get_files(division_dir, "sam")
+    qsub_shells = []
+
+    for division in division_list:
+	name = os.path.basename(division)
+	division_bam = "%s/%s.bam" % (sort_dir, name)
+	sort_bam = "%s.sort" % (division_bam)
+
+	sort_shell = "%s\n%s view -Sb %s -o %s\n%s sort %s %s" %\
+		(SGEHEAD, SAMTOOLS, division, division_bam, SAMTOOLS,\
+		division_bam, sort_bam)
+	sort_shell_name = "sort_%s.sh" % (name)
+
+	qsub_shells.append(makeShell.make_shell\
+		(sort_dir, sort_shell, sort_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=4G")
+		
+
+def consensus(Args):
+    
+    if not Args:
+	print "\nUsage:\t[options] <sortDir> <referenceDir> <consensusDir>"
+	cmd = "%s mpileup" % (SAMTOOLS)
+	getUsage(cmd)
+	sys.exit(0)
+	
+    options = ' '.join(Args[0:-3])
+    sort_dir = Args[-3]
+    reference_dir = Args[-2]
+    cns_dir = Args[-1]
+    dirCheck.mkdir(cns_dir)
+	
+    sort_file_list = getFiles.get_files(sort_dir, "sort.bam")
+    qsub_shells = []
+
+    for sort_file in sort_file_list:
+	sort_file = sort_file.rstrip()
+	basename = os.path.basename(sort_file)
+	name = basename.split('.')[0]
+	reference = reference_dir + '/' + name.split('_')[-1] + ".fa"
+	cns_file = cns_dir + '/' + name + ".cns"
+			
+	cns_shell = "%s\n%s mpileup %s -f %s %s > %s" %\
+		(SGEHEAD, SAMTOOLS, options, reference, sort_file, cns_file)
+	cns_shell_name = "mpileup_%s.sh" % (name)
+
+	qsub_shells.append(makeShell.make_shell\
+		(cns_dir, cns_shell, cns_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=4G")
+
+
+def snp(Args):
+
+    usage = "snp [options] <cnsDir> <snpDir>"
+    parser = OptionParser(usage)
+    parser.add_option("-l", "--read_length",
+	    dest = "rlen",
+	    type = "int",
+	    help = "read length[90]",
+	    default = 90
+	    )
+    parser.add_option("-b", "--min_baq",
+	    dest = "min_baq",
+	    type = "int",
+	    help = "minimal baq to detect snp[15]",
+	    default = 15
+	    )
+    parser.add_option("-m", "--min_maq",
+	    dest = "min_maq",
+	    type = "int",
+	    help = "minimal maq to detect snp[32]",
+	    default = 32
+	    )
+    parser.add_option("-r", "--min_rate",
+	    dest = "min_rate",
+	    type = "float",
+	    help = "minimal rate of snp[0.1]",
+	    default = 0.1
+	    )
+    parser.add_option("-d", "--max_depth",
+	    dest = "max_depth",
+	    type = "int",
+	    help = "maximal depth to detect snp[100]",
+	    default = 100
+	    )
+    parser.add_option("-w", "--wgd_dir",
+	    dest = "wgd",
+	    type = "string",
+	    help = "wgd directory",
+	    default = "-"
+	    )
+
+    if not Args:
+	print >>sys.stderr, parser.print_help()
+	sys.exit(0)
+	
+    snp_dir = Args[-1]
+    cns_dir = Args[-2]
+
+    (options, args) = parser.parse_args(args = Args)
+	
+    read_length = options.rlen
+    min_baq = options.min_baq
+    min_maq = options.min_maq
+    snp_rate = options.min_rate
+    max_depth = options.max_depth
+    wgd_dir = options.wgd
+
+    dirCheck.mkdir(snp_dir)
+	
+    cns_list = getFiles.get_files(cns_dir, "cns")
+    qsub_shells = []
+    for cns in cns_list:
+	base_name = os.path.basename(cns).replace(".cns", "")
+	chrom = base_name.split("_")[-1]
+	if wgd_dir == '-':
+	    snp_shell = "%s\npython %s %s %s %d %d %.2f %d %d %s/%s.snp" %\
+		    (SGEHEAD, SNP, cns, wgd_dir, min_baq, min_maq, snp_rate,\
+		    read_length, max_depth, snp_dir, base_name)
+	else:
+	    snp_shell = "%s\npython %s %s %s/%s.wgd %d %d %.2f %d %d %s/%s.snp" %\
+		    (SGEHEAD, SNP, cns, wgd_dir, chrom, min_baq, min_maq, snp_rate,\
+		    read_length, max_depth, snp_dir, base_name)
+
+	snp_shell_name = "snp_%s.sh" % (base_name)
+	qsub_shells.append(makeShell.make_shell\
+		(snp_dir, snp_shell, snp_shell_name))
+
+    manJob.manJobs(qsub_shells, "-cwd -l vf=2G")
+
+
+def indel(Args):
+    
+    if not Args:
+	print "Usage:\tindel <sortDir> <referenceDir> <indelDir>"
+	sys.exit(0)
+	
+    sort_dir = Args[0]
+    ref_dir = Args[1]
+    indel_dir = Args[2]
+
+    indel_cmd = "python %s %s %s %s" % (INDEL, sort_dir, ref_dir, indel_dir)
+    work(indel_cmd)
+
+
+############################################################
+USAGE = """
+Program: genome re-sequencing pipeline, detect SNP and Indel
+
+Usage:	 resequencing <command> [option] 
+
+Command: align		do alignment with bwa
+	 sam		sampe or samse
+	 division	divide align result by chromosome
+	 sort		sort division results
+	 consensus	consensus sequence
+	 snp		calling snp
+	 indel		calling indel
+
+Ver:\tV1.4
+Author:\tChen Jiehu <chenjiehu@scgene.com>
+"""
+############################################################
+
+if __name__ == "__main__":
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "align":
+	align(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "sam":
+	sam(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "division":
+	division(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "sort":
+	sort(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "consensus":
+	consensus(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "snp":
+	snp(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "indel":
+	indel(sys.argv[2:])
+    else:
+	print USAGE
+	sys.exit(0)
