@@ -1,7 +1,11 @@
+import sys
+sys.path.append('/scgene/tiger/invent/guoshuguang/program/moduls')
+from path import path
+from Bio import SeqIO
 from dict_key_of_max_value import dict_key_of_max_value
 # from file_filter import file_filter
 from two_dimensional_array_transformation import two_dimensional_array_transformation
-from encapsulate_pickle import data_dump, data_load
+from encapsulate_pickle import dump, load
 from matplotlibMethod import hzebra, vzebra, adjust_spines, adjust_ticks_label_size
 from frange import frange, fxrange
 from collections import namedtuple

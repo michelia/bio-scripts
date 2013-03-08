@@ -3,16 +3,15 @@ try:
 except:
     import pickle
 
-def data_dump(pathToFile, data):
+def dump(data, pathToFile):
     '''
     Save a data to a pathToFile according the pickle moudle.
     '''
-    print pathToFile
     toFile = open(pathToFile, 'w')
     pickle.dump(data, toFile)
     toFile.close()
 
-def data_load(pathToFile):
+def load(pathToFile):
     '''
     Load a data from a pathToFile. The dataFile is pickle file(.piso)
     '''
