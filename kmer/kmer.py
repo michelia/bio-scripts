@@ -3,8 +3,11 @@ from __future__ import division
 import sys
 sys.path.append('/scgene/tiger/invent/guoshuguang/repo_michelia/')
 from michelia import SeqIO, dump, load, path
+from itertools import groupby
 
 ''' 把所有程序写道一个文件中， 相当与总结吧'''
+
+splitStep = 500000   # 这一个 每一份所包含的最大的kmer个数。
 
 def seq2kmer(seq, kmerLen=17):
     seqLen = len(seq)
@@ -37,18 +40,20 @@ def kmer2num(kmer, kmerLen=17):
         kmerNum += 4**i * base2num[base]
     return kmerNum 
 
-def num2piso(num):
+def nums2piso(pisoID, nums):
     '''
     每个piso中包含一个有5*10**5个元素的字典
     '''
-    pisoID = num // 500000
     pisoFile = '/scgene/tiger/invent/guoshuguang/kmerDate/piso5/kmers_%s.piso' % pisoID
+    # pisoFile = '/scgene/tiger/invent/guoshuguang/kmerDate/testpiso/kmers_%s.piso' % pisoID
     if path(pisoFile).exists():
         kmersDict = load(pisoFile)
-        kmersDict[num] = kmersDict.get(num, 0) + 1
-        dump(kmersDict, pisoFile)
     else:
-        dump({num: 1}, pisoFile)
+        kmersDict = {}
+    for num in nums:
+        # print num
+        kmersDict[num] = kmersDict.get(num, 0) + 1
+    dump(kmersDict, pisoFile)
 
 def sta_piso(pisoDic):
     staDict = {}
@@ -59,11 +64,24 @@ def sta_piso(pisoDic):
     return staDict
 
 
+def numList2piso(numList):
+    numList = sorted(numList)
+    for pisoID, nums in groupby(numList, key=lambda x: x//splitStep):
+        # print pisoID, nums
+        nums2piso(pisoID, nums)
 
 # fastqFile = '/scgene/tiger/invent/guoshuguang/kmerDate/test2.fq'
 fastqFile = '/scgene/tiger/invent/guoshuguang/kmerDate/rice_genome_1_500m.fq'
 
+# def get_nums(fastqFile)
+numList = []
+flag = 0
 for kmer in fastq2kmer(fastqFile):
     num = kmer2num(kmer)
-    # print num
-    num2piso(num)
+    numList.append(num)
+    flag += 1
+    if flag == 500000:
+        numList2piso(numList)
+        flag = 0
+        numList = []
+numList2piso(numList)
