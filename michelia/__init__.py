@@ -9,7 +9,7 @@ from encapsulate_pickle import dump, load
 from matplotlibMethod import hzebra, vzebra, adjust_spines, adjust_ticks_label_size
 from frange import frange, fxrange
 from collections import namedtuple
-import michelia_csv
+from michelia_csv import CsvReader
 import csv
 def csvreader(fileHandel):
     return csv.reader(fileHandel, 'excel-tab')
