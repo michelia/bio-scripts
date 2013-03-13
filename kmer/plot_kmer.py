@@ -4,6 +4,8 @@ import sys, pdb, argparse, time
 b = pdb.set_trace
 sys.path.append('/scgene/tiger/invent/guoshuguang/repo_michelia/')
 from michelia import CsvReader
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
@@ -18,7 +20,7 @@ def plot_fun(dataFile, outPic):
     ax.plot(x, y, linestyle='-', marker='.', mfc='r')
     ax.set_xlabel('Depth')
     ax.set_ylabel('Frequency')
-    ax.set_xlim(0, 50)
+    ax.set_xlim(0, 80)
     # ax.set_ylim(0, 50)
     # plt.show()
     fig.savefig(outPic)
