@@ -1,0 +1,4 @@
+Unique:    153981222
+Distinct:  638456924
+Total:     9401695849
+Max_count: 689984
