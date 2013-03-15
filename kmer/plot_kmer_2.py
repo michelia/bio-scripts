@@ -16,7 +16,7 @@ def plot_fun(dataDir, outPic):
     # colors = ['#DC143C','#8B008B','#00008B','#483D8B','#00FFFF','#008080','#9400D3','#FF00FF','#66CDAA','#008000']
     colors = ['#8B0000', '#FF8C00', '#008000', '#ADFF2F', '#0000CD', '#000000', '#DC143C', '#E9967A', '#808080', '#FF00FF',]
     files = sorted(path(dataDir).files('*.histo'))
-    labels = ('1/2', '1/4')
+    labels = ('1', '1/2', '1/4')
     for i, dataFile in enumerate(files):
         filename = path(dataFile).name
         num = re.findall(r'\d+', filename)[0]
